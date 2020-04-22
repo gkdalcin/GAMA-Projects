@@ -1,0 +1,231 @@
+//Computes centrality and accessibility measures in a graph 
+//Future enhancenments: transform heap into class
+
+model urban_measures
+global {
+	file shpEdges <- file("include/LI_conexoes_RS_V3.shp");
+	file shpNodes <- file("include/PT_cidades_RS_V2.shp");
+	
+	int n <- length(shpNodes);
+	list<int> loadList <- list_with(n,0);
+	geometry shape <- envelope(shpEdges);
+	
+	init {
+		create node_agent from: shpNodes with: [id::int(read("ID_REAL")),load::int(read("Load")), fk::float(read("fk2")), nome::string(read("NM_MUNICIP"))];
+		create edge_agent from: shpEdges with: [impedance::int(read("Impedance"))];
+		matrix<int> pivotMatrix <- -1 as_matrix({n,n});
+		
+		//Start of Djikstra algorithm using Binary Heap
+		//in order to find shortest paths to all other nodes 
+		//using a different node as source in each loop
+		list<node_agent> heap;
+		node_agent closestAdjacent;
+		node_agent nodeAux;
+		int heapIndex;
+		int childVal; 
+		int parentVal;
+		int childPos; 
+		int parentPos;
+		int child1pos; int child2pos;
+		int child1val; int child2val;
+		int countInsertedElem;
+		
+		//Insert nodes into heap and keep it ordered
+		loop source over: node_agent {
+			heap <- ([]);
+			countInsertedElem <- 0;
+			loop node over: node_agent {
+				add node to: heap;
+				
+				//HeapifyUp
+				childPos <- countInsertedElem;
+				childVal <- source.cost[node.id];
+				parentPos <- (childPos-1)/2;
+				parentVal <- source.cost[heap[parentPos]];
+				loop while: childPos != 0 and childVal < parentVal {
+					//swap child position and parent position
+					nodeAux <- heap[childPos];
+					heap[childPos] <- heap[parentPos];
+					heap[parentPos] <- nodeAux;
+					childPos <- parentPos;
+					parentPos <- (childPos-1)/2;
+					parentVal <- source.cost[heap[parentPos]];
+				}
+				countInsertedElem <- countInsertedElem + 1;
+			}
+			
+			//Remove from heap the closest node to source and update
+			//the distance of the remaining nodes, keeping the heap ordered
+			heapIndex <- 0;
+			loop times:n {
+				//Change positions between first and last elements of heap
+				nodeAux <- heap[0];
+				heap[0] <- heap[n-1-heapIndex];
+				heap[n-1-heapIndex] <- nodeAux;
+				closestAdjacent <- heap[n-1-heapIndex];
+				
+				//Removes closest node from heap
+				remove last(heap) from: heap;
+				heapIndex <- heapIndex + 1;
+				
+				//Heapify Down
+				parentPos <- 0;
+				if length(heap) > 0 {loop while: parentPos >= 0 {
+					parentVal <- source.cost[heap[parentPos].id];
+					child1pos <- (parentPos*2)+1;
+					if child1pos < n - heapIndex {child1val <- source.cost[heap[child1pos].id];}
+					child2pos <- (parentPos*2)+2; 
+					if child2pos < n - heapIndex {child2val <- source.cost[heap[child2pos].id];}
+					
+					if (parentVal > child1val or parentVal > child2val) and child2pos < n - heapIndex {
+						if child1val < child2val {
+							//swap
+							nodeAux <- heap[parentPos];
+							heap[parentPos] <- heap[child1pos];
+							heap[child1pos] <- nodeAux;
+							parentPos <- child1pos;
+						}
+						else {
+							//swap
+							nodeAux <- heap[parentPos];
+							heap[parentPos] <- heap[child2pos];
+							heap[child2pos] <- nodeAux;
+							parentPos <- child2pos;
+						}
+					} 
+					else if parentVal > child1val and child2pos = n - heapIndex {
+						//swap
+						nodeAux <- heap[parentPos];
+						heap[parentPos] <- heap[child1pos];
+						heap[child1pos] <- nodeAux;
+						parentPos <- child1pos;
+					}
+					else {parentPos <- -1;}
+				}
+				}
+			
+				//Updates distance costs from source node
+				loop neighbor over: closestAdjacent.neigh_list {
+					if source.cost[neighbor.id] > source.cost[closestAdjacent.id] + closestAdjacent.cost[neighbor.id] {
+						source.cost[neighbor.id] <- source.cost[closestAdjacent.id] + closestAdjacent.cost[neighbor.id];
+						pivotMatrix[source.id,neighbor.id] <- closestAdjacent.id;
+						//HeapifyUp for the updated node
+						childPos <- index_of(heap, neighbor);
+						childVal <- source.cost[neighbor.id];
+						parentPos <- (childPos-1)/2;
+						parentVal <- source.cost[heap[parentPos]];
+						
+						loop while: childPos != 0 and childVal < parentVal {
+							nodeAux <- heap[childPos];
+							heap[childPos] <- heap[parentPos];
+							heap[parentPos] <- nodeAux;
+							childPos <- parentPos;
+							parentPos <- (childPos-1)/2;
+							parentVal <- source.cost[heap[parentPos]];
+						}
+					}
+				}
+			}
+		}
+		
+		//Compute the number of points in the shortest path between each pair of nodes
+		int pairLoad;
+		list<int> midPoints;
+		int aux;
+		float centrQuote;
+		
+		loop origin from:0 to:n-1 {
+			loop destin from:0 to:n-1{
+				if origin != destin {
+					midPoints <- ([]);
+					pairLoad <- loadList[origin]+loadList[destin];
+					aux <- destin;
+					loop while: pivotMatrix[origin,aux] != -1 {
+						add pivotMatrix[origin,aux] to: midPoints;
+						aux <- pivotMatrix[origin,aux];
+					}
+					if length(midPoints) > 0 {
+						centrQuote <- pairLoad/length(midPoints);
+						loop point_id over:midPoints {node_agent[point_id].centrality <- node_agent[point_id].centrality + centrQuote;}
+					}
+				}
+			}
+		}
+		
+		loop node over: node_agent {
+			loop dist over: node.cost {
+			if dist != 0 {node.accessibility <- node.accessibility + (1/dist);}
+			}
+		}
+		
+		save node_agent to: "CFK_GeoHeap.shp" type: "shp" with: [centrality::"cent",fk::"fk", nome::"NM",numberOfNeigh::"vizinhos",accessibility::"access"];
+	}
+}
+
+species node_agent parent: graph_node edge_species: edge_agent {
+	string nome;
+	int id;
+	int load;
+	int numberOfNeigh;
+	float centrality <- 0.0;
+	float accessibility <- 0.0;
+	float fk; //TODO: remove this variable
+	list<node_agent> neigh_list;
+	list<int> cost <- list_with(n,999999999);
+	
+	init {
+		//Insert node data to global lists
+		loadList[id] <- load;
+		cost[id] <- 0;
+		
+		//Compute number of neighbor nodes
+		using topology:topology(world) {
+			loop edge over: shpEdges {
+				if self distance_to edge < 15.0 { 
+					loop node over: node_agent {
+						if node.id != self.id and node distance_to edge < 15.0 {add node to: neigh_list;}
+					}
+				}
+			}
+			numberOfNeigh <- length(neigh_list);
+		}
+	}
+	
+	bool related_to(node_agent other) {
+		if (neigh_list contains (other)) { return true; }
+		return false;
+	}
+	
+	aspect base {draw circle(5*centrality) color:#lightblue;}
+}
+
+species edge_agent parent: base_edge {
+	float impedance;
+	list<node_agent> vertices;
+	init {
+		using topology:topology(world) {
+			impedance <- impedance*self.shape.perimeter;
+			loop node over: node_agent {
+				if self distance_to node < 15.0 {add node to: vertices;}
+			}
+			if length(vertices) = 2 {
+				node_agent v1 <- vertices[0];
+				node_agent v2 <- vertices[1];
+				int v1_id <- v1.id;
+				int v2_id <- v2.id;
+				v1.cost[v2_id] <- impedance;
+				v2.cost[v1_id] <- impedance;
+			}
+		}		
+	}
+	aspect base {draw shape color: #lightgray;}
+}
+
+experiment Execute type: gui {
+	output {
+		display MyDisplay {
+			species node_agent aspect: base;
+			species edge_agent aspect: base;
+		}
+	}
+}
